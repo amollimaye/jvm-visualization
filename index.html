@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JVM Internals Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="toolbar">
+      <div>
+        <p class="eyebrow">Conceptual JVM Simulator</p>
+        <h1>Interactive JVM Internals Visualizer</h1>
+      </div>
+      <div class="controls">
+        <button data-scenario="objectCreation">Object Creation</button>
+        <button data-scenario="garbageCollection">Garbage Collection</button>
+        <button data-scenario="threadStack">Thread Stack</button>
+        <button data-scenario="stringHandling">String Handling</button>
+        <button class="secondary" id="pause-button" disabled>Pause</button>
+        <button class="secondary" id="next-step-button" disabled>Next Step</button>
+        <button class="secondary" id="resume-button" disabled>Resume</button>
+        <button class="secondary" id="reset-button">Reset State</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <svg id="reference-layer" class="reference-layer" aria-hidden="true"></svg>
+
+      <section class="heap-panel panel">
+        <div class="panel-heading">
+          <h2>Heap</h2>
+          <p>Young objects start in Eden, age through survivor spaces, then enter Old Gen.</p>
+        </div>
+
+        <div class="education-strip">
+          <section class="education-card">
+            <h3>Java Code</h3>
+            <div id="code-panel"></div>
+          </section>
+
+          <section class="education-card">
+            <h3>Current Step</h3>
+            <div id="step-description">Choose a scenario to follow each JVM step.</div>
+          </section>
+        </div>
+
+        <div class="heap-layout">
+          <div class="heap-column">
+            <div class="heap-section" data-section="eden">
+              <div class="section-title">Young Gen - Eden</div>
+              <div class="object-zone" id="eden-zone"></div>
+            </div>
+            <div class="survivor-row">
+              <div class="heap-section" data-section="s0">
+                <div class="section-title">Survivor S0</div>
+                <div class="object-zone" id="s0-zone"></div>
+              </div>
+              <div class="heap-section" data-section="s1">
+                <div class="section-title">Survivor S1</div>
+                <div class="object-zone" id="s1-zone"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="heap-column old-column">
+            <div class="heap-section old-gen" data-section="old">
+              <div class="section-title">Old Gen</div>
+              <div class="object-zone" id="old-zone"></div>
+            </div>
+            <div class="heap-section string-pool" data-section="stringPool">
+              <div class="section-title">String Pool</div>
+              <div class="object-zone" id="stringPool-zone"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stack-panel panel">
+        <div class="panel-heading">
+          <h2>Thread Stack</h2>
+          <p>GC roots in this simulator come only from stack-frame locals.</p>
+        </div>
+        <div id="stack-root" class="stack-root"></div>
+      </section>
+
+      <aside class="side-panel panel">
+        <div class="panel-heading">
+          <h2>Details</h2>
+          <p>Follow each step, inspect objects, and see why the JVM model changes.</p>
+        </div>
+
+        <div class="side-section">
+          <h3>Step Description</h3>
+          <p id="side-step-description">Choose a scenario to follow each JVM step.</p>
+        </div>
+
+        <div class="side-section">
+          <h3>What Just Happened</h3>
+          <p id="event-text">The simulator is ready. Choose a scenario to start.</p>
+        </div>
+
+        <div class="side-section">
+          <h3>Why It Matters</h3>
+          <p id="explanation-text">This visualization models simplified JVM memory rules with deterministic behavior.</p>
+        </div>
+
+        <div class="side-section">
+          <h3>Selection</h3>
+          <div id="selection-content" class="selection-content">
+            <p>No object or section selected yet.</p>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <section class="telemetry-panel panel">
+      <div class="panel-heading">
+        <h2>Memory Telemetry</h2>
+        <p>Live heap and stack allocation patterns update as objects allocate, survive, promote, and get collected.</p>
+      </div>
+
+      <div class="telemetry-shell">
+        <div class="telemetry-chart-wrap">
+          <svg id="memory-chart" class="memory-chart" viewBox="0 0 960 240" preserveAspectRatio="none" aria-label="Heap usage chart"></svg>
+        </div>
+        <div id="memory-legend" class="memory-legend"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="state.js"></script>
+  <script src="renderer.js"></script>
+  <script src="animator.js"></script>
+  <script src="scenarios.js"></script>
+  <script src="controller.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
