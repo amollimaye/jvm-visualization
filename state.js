@@ -5,7 +5,13 @@ const baseUi = () => ({
   selected: null,
   lastEvent: "The simulator is ready. Choose a scenario to start.",
   explanation: "This visualization models simplified JVM memory rules with deterministic behavior.",
-  runningScenario: null
+  runningScenario: null,
+  highlightThread: null,
+  memoryArrow: null,
+  visibilityBanner: null,
+  highlightCodeVolatile: false,
+  // Dual-stack layout after Volatile Behavior; cleared when another scenario starts or reset.
+  volatileShowSecondStack: false
 });
 
 const baseState = () => ({
@@ -18,6 +24,15 @@ const baseState = () => ({
     stringPool: []
   },
   stack: [],
+  stack2: [],
+  sharedObject: {
+    counter: 0,
+    volatile: false
+  },
+  threadLocal: {
+    T1: { counter: 0 },
+    T2: { counter: 0 }
+  },
   ui: baseUi()
 });
 
@@ -49,7 +64,9 @@ function currentHeapSection(objectId) {
 }
 
 function localReferences() {
-  return state.stack.flatMap((frame) => Object.values(frame.locals)).filter(Boolean);
+  const from1 = state.stack.flatMap((frame) => Object.values(frame.locals)).filter(Boolean);
+  const from2 = (state.stack2 || []).flatMap((frame) => Object.values(frame.locals)).filter(Boolean);
+  return [...from1, ...from2];
 }
 
 function markEvent(lastEvent, explanation) {
@@ -62,6 +79,9 @@ function resetState() {
   state.objects = fresh.objects;
   state.heap = fresh.heap;
   state.stack = fresh.stack;
+  state.stack2 = fresh.stack2;
+  state.sharedObject = fresh.sharedObject;
+  state.threadLocal = fresh.threadLocal;
   state.ui = fresh.ui;
   resetObjectCounter();
 }
@@ -76,6 +96,12 @@ function setScenarioRunning(name) {
 
 function clearScenarioRunning() {
   state.ui.runningScenario = null;
+  // MEMORY_VISIBILITY-only UI; clear so overlays do not linger after playback ends.
+  state.ui.memoryArrow = null;
+  state.ui.highlightThread = null;
+  state.ui.visibilityBanner = null;
+  state.ui.highlightCodeVolatile = false;
+  // Keep volatileShowSecondStack: Thread 2 stays visible after Volatile Behavior until another scenario or reset.
 }
 
 function getStateSnapshot() {
@@ -185,13 +211,17 @@ function deleteObject(payload) {
   // Mark first so the renderer can animate the disappearing object before final removal.
   object.pendingDelete = true;
   object.deleted = true;
-  state.stack.forEach((frame) => {
-    Object.entries(frame.locals).forEach(([name, value]) => {
-      if (value === payload.id) {
-        delete frame.locals[name];
-      }
+  const purgeRefsFrom = (stack) => {
+    stack.forEach((frame) => {
+      Object.entries(frame.locals).forEach(([name, value]) => {
+        if (value === payload.id) {
+          delete frame.locals[name];
+        }
+      });
     });
-  });
+  };
+  purgeRefsFrom(state.stack);
+  purgeRefsFrom(state.stack2 || []);
 }
 
 function finalizeDeletion(objectId) {
@@ -256,6 +286,84 @@ function annotateStep(lastEvent, explanation) {
   markEvent(lastEvent, explanation);
 }
 
+function syncSharedHeapObject(objectId) {
+  if (!objectId || !state.objects[objectId]) {
+    return;
+  }
+  const o = state.objects[objectId];
+  if (o.type !== "SharedObject") {
+    return;
+  }
+  const vol = state.sharedObject.volatile ? ", volatile" : "";
+  o.value = `SharedObject { counter: ${state.sharedObject.counter}${vol} }`;
+}
+
+function applyMemoryVisibility(payload) {
+  if (payload.sharedObject) {
+    state.sharedObject = {
+      ...state.sharedObject,
+      ...payload.sharedObject
+    };
+  }
+  if (payload.threadLocal) {
+    if (payload.threadLocal.T1) {
+      state.threadLocal.T1 = { ...state.threadLocal.T1, ...payload.threadLocal.T1 };
+    }
+    if (payload.threadLocal.T2) {
+      state.threadLocal.T2 = { ...state.threadLocal.T2, ...payload.threadLocal.T2 };
+    }
+  }
+  if (payload.stacks) {
+    if (Object.prototype.hasOwnProperty.call(payload.stacks, "t1")) {
+      state.stack = payload.stacks.t1.map((frame) => ({
+        method: frame.method,
+        locals: { ...(frame.locals || {}) }
+      }));
+    }
+    if (Object.prototype.hasOwnProperty.call(payload.stacks, "t2")) {
+      state.stack2 = payload.stacks.t2.map((frame) => ({
+        method: frame.method,
+        locals: { ...(frame.locals || {}) }
+      }));
+    }
+  }
+  if (payload.ensureHeapObject) {
+    const spec = payload.ensureHeapObject;
+    if (!state.objects[spec.id]) {
+      createObject({
+        id: spec.id,
+        type: "SharedObject",
+        value: "",
+        generation: "eden",
+        age: 0,
+        section: spec.section || "eden"
+      });
+    }
+    syncSharedHeapObject(spec.id);
+  }
+  if (payload.volatileSharedId) {
+    syncSharedHeapObject(payload.volatileSharedId);
+  }
+}
+
+function setMemoryVisibilityUi(ui) {
+  if (!ui) {
+    state.ui.highlightThread = null;
+    state.ui.memoryArrow = null;
+    state.ui.visibilityBanner = null;
+    state.ui.highlightCodeVolatile = false;
+    state.ui.volatileShowSecondStack = false;
+    return;
+  }
+  state.ui.highlightThread = ui.highlightThread ?? null;
+  state.ui.memoryArrow = ui.memoryArrow ?? null;
+  state.ui.visibilityBanner = ui.visibilityBanner ?? null;
+  state.ui.highlightCodeVolatile = ui.highlightCodeVolatile ?? false;
+  if (Object.prototype.hasOwnProperty.call(ui, "volatileShowSecondStack")) {
+    state.ui.volatileShowSecondStack = Boolean(ui.volatileShowSecondStack);
+  }
+}
+
 window.JVMSim = {
   ...(window.JVMSim || {}),
   state,
@@ -275,6 +383,9 @@ window.JVMSim = {
   ensureStringLiteral,
   getObjectDetails,
   getHeapDetails,
-  annotateStep
+  annotateStep,
+  applyMemoryVisibility,
+  setMemoryVisibilityUi,
+  syncSharedHeapObject
 };
 })();

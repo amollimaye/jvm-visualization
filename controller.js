@@ -6,8 +6,10 @@ const {
   renderCodePanel,
   highlightCodeLine,
   resetMemoryTelemetry,
-  setStepDescription,
+  clearExecutionSteps,
+  appendExecutionStep,
   annotateStep,
+  applyMemoryVisibility,
   clearScenarioRunning,
   clearObjectMarks,
   createObject,
@@ -16,6 +18,7 @@ const {
   moveObject,
   resetState,
   setScenarioRunning,
+  setMemoryVisibilityUi,
   setSelectedSelection,
   state,
   updateStack,
@@ -127,6 +130,9 @@ function applyStep(step) {
     moveObject(step.payload);
   } else if (step.type === "DELETE_OBJECT") {
     deleteObject(step.payload);
+  } else if (step.type === "MEMORY_VISIBILITY") {
+    applyMemoryVisibility(step.payload);
+    setMemoryVisibilityUi(step.ui);
   } else {
     throw new Error(`Unknown step type: ${step.type}`);
   }
@@ -136,7 +142,7 @@ async function runSteps(steps) {
   for (const step of steps) {
     await waitForPlaybackGate();
     highlightCodeLine(step.codeLine);
-    setStepDescription(step.description);
+    appendExecutionStep(step.description);
 
     // Capture the old layout first so movement and compaction can use FLIP-style transitions.
     const previousLayout = prepareForAnimation(step);
@@ -161,12 +167,16 @@ async function runScenario(name) {
   } else {
     clearObjectMarks();
   }
+  if (name !== "volatileBehavior") {
+    state.ui.volatileShowSecondStack = false;
+  }
   setScenarioRunning(name);
   resetPlaybackState();
   updatePlaybackButtons();
   renderCodePanel(scenario.code);
   highlightCodeLine(null);
-  setStepDescription("Choose a highlighted line to follow the next JVM state change.");
+  clearExecutionSteps("");
+  appendExecutionStep("Choose a highlighted line to follow the next JVM state change.");
   annotateStep(scenario.intro.title, scenario.intro.why);
   render(onSelect);
 
@@ -187,7 +197,7 @@ function handleReset() {
   resetPlaybackState();
   renderCodePanel([]);
   highlightCodeLine(null);
-  setStepDescription("Choose a scenario to follow each JVM step.");
+  clearExecutionSteps("Choose a scenario to follow each JVM step.");
   annotateStep(
     "Reset the simulator to an empty, deterministic baseline.",
     "All objects, references, and frames were cleared so the next scenario starts from a known state."

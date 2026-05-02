@@ -103,7 +103,7 @@ function animateMove(previousLayout, duration) {
 }
 
 function runAnimation(step, previousLayout, onSelect, duration) {
-  if (step.type === "MARK_OBJECTS" || step.type === "CLEAR_MARKS") {
+  if (step.type === "MARK_OBJECTS" || step.type === "CLEAR_MARKS" || step.type === "MEMORY_VISIBILITY") {
     return wait(duration);
   }
   if (step.type === "CREATE_OBJECT") {

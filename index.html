@@ -21,6 +21,7 @@
         <button data-scenario="garbageCollection">Garbage Collection</button>
         <button data-scenario="threadStack">Thread Stack</button>
         <button data-scenario="stringHandling">String Handling</button>
+        <button data-scenario="volatileBehavior">Volatile Behavior</button>
         <button class="secondary" id="pause-button" disabled>Pause</button>
         <button class="secondary" id="next-step-button" disabled>Next Step</button>
         <button class="secondary" id="resume-button" disabled>Resume</button>
@@ -38,14 +39,14 @@
         </div>
 
         <div class="education-strip">
-          <section class="education-card">
-            <h3>Java Code</h3>
-            <div id="code-panel"></div>
-          </section>
-
-          <section class="education-card">
-            <h3>Current Step</h3>
-            <div id="step-description">Choose a scenario to follow each JVM step.</div>
+          <section class="education-card execution-steps-card">
+            <h3>Execution Steps</h3>
+            <p class="execution-steps-subtitle">
+              Steps stack chronologically below; newer steps appear at the bottom and scroll into view automatically (scroll up to revisit earlier stages).
+            </p>
+            <div id="step-description" class="execution-steps-scroll" aria-label="Scenario execution timeline" aria-live="polite">
+              <div id="execution-steps-feed" class="execution-steps-feed"></div>
+            </div>
           </section>
         </div>
 
@@ -80,13 +81,24 @@
         </div>
       </section>
 
-      <section class="stack-panel panel">
-        <div class="panel-heading">
-          <h2>Thread Stack</h2>
-          <p>GC roots in this simulator come only from stack-frame locals.</p>
-        </div>
-        <div id="stack-root" class="stack-root"></div>
-      </section>
+      <div class="thread-stacks-wrap">
+        <section class="stack-panel panel" data-thread-panel="T1">
+          <div class="panel-heading">
+            <h2>Thread 1 Stack</h2>
+            <p>GC roots in this simulator come only from stack-frame locals.</p>
+          </div>
+          <div id="stack-root" class="stack-root"></div>
+          <div class="local-cache" data-thread-cache="T1" aria-label="Thread 1 local cache"></div>
+        </section>
+        <section class="stack-panel panel" data-thread-panel="T2">
+          <div class="panel-heading">
+            <h2>Thread 2 Stack</h2>
+            <p>Parallel thread stack and local cache for Thread 2.</p>
+          </div>
+          <div id="stack-root-t2" class="stack-root"></div>
+          <div class="local-cache" data-thread-cache="T2" aria-label="Thread 2 local cache"></div>
+        </section>
+      </div>
 
       <aside class="side-panel panel">
         <div class="panel-heading">
@@ -96,7 +108,9 @@
 
         <div class="side-section">
           <h3>Step Description</h3>
-          <p id="side-step-description">Choose a scenario to follow each JVM step.</p>
+          <div id="side-step-description" class="side-execution-steps execution-steps-scroll" aria-label="Step timeline" aria-live="polite">
+            <div id="side-execution-steps-feed" class="execution-steps-feed"></div>
+          </div>
         </div>
 
         <div class="side-section">

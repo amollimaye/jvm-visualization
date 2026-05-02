@@ -2,6 +2,7 @@
 const { getHeapDetails, getObjectDetails, getReachableObjectIds, state } = window.JVMSim;
 let currentCodeLines = [];
 let currentActiveLine = null;
+let executionStepSerial = 0;
 let memoryHistory = [];
 let lastMemorySignature = null;
 
@@ -39,33 +40,55 @@ function generationLabel(section) {
 
 function getReferenceNamesForObject(objectId) {
   const names = [];
-  state.stack.forEach((frame) => {
-    Object.entries(frame.locals).forEach(([name, value]) => {
-      if (value === objectId) {
-        names.push(name);
-      }
+  const scanStack = (stack) => {
+    stack.forEach((frame) => {
+      Object.entries(frame.locals).forEach(([name, value]) => {
+        if (value === objectId) {
+          names.push(name);
+        }
+      });
     });
-  });
+  };
+  scanStack(state.stack);
+  scanStack(state.stack2 || []);
   return names;
 }
 
-function renderStack(onSelect) {
-  const stackRoot = el("stack-root");
+/** Human-readable stack local value; keeps object id in data-object-anchor for arrows/GC. */
+function formatStackLocalTarget(value, threadKey) {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (value === "volatileShared" && state.ui.volatileShowSecondStack) {
+    if (state.sharedObject.volatile === true) {
+      return threadKey === "T2" ? "volatile SharedObject s2" : "volatile SharedObject s1";
+    }
+    return "SharedObject";
+  }
+  return String(value);
+}
+
+function renderStackPanel(stackRootId, stackFrames, threadKey, onSelect) {
+  const stackRoot = el(stackRootId);
+  if (!stackRoot) {
+    return;
+  }
   stackRoot.innerHTML = "";
 
-  state.stack.forEach((frame, frameIndex) => {
+  stackFrames.forEach((frame, frameIndex) => {
     const frameNode = document.createElement("article");
     frameNode.className = "stack-frame";
     frameNode.dataset.frameIndex = String(frameIndex);
 
-    if (state.ui.selected?.kind === "frame" && state.ui.selected.index === frameIndex) {
+    const selThread = state.ui.selected?.thread ?? "T1";
+    if (state.ui.selected?.kind === "frame" && selThread === threadKey && state.ui.selected.index === frameIndex) {
       frameNode.classList.add("is-selected");
     }
 
     const localRows = Object.entries(frame.locals).map(([name, value]) => `
-      <div class="local-row" data-object-anchor="${value}">
-        <span class="local-name">${name}</span>
-        <span class="local-target">${value ?? "null"}</span>
+      <div class="local-row" data-object-anchor="${value ?? ""}">
+        <span class="local-name">${escapeHtml(name)}</span>
+        <span class="local-target">${escapeHtml(formatStackLocalTarget(value, threadKey))}</span>
       </div>
     `).join("") || `<div class="local-row"><span class="local-name">No locals</span><span class="local-target">empty</span></div>`;
 
@@ -77,11 +100,32 @@ function renderStack(onSelect) {
 
     frameNode.addEventListener("click", () => onSelect({
       kind: "frame",
+      thread: threadKey,
       index: frameIndex
     }));
 
     stackRoot.appendChild(frameNode);
   });
+
+  const cacheEl = document.querySelector(`[data-thread-cache="${threadKey}"]`);
+  if (cacheEl) {
+    const tl = state.threadLocal[threadKey];
+    const counterVal = tl ? tl.counter : 0;
+    cacheEl.innerHTML = `
+      <div class="local-cache-title">Local Cache</div>
+      <div class="local-cache-row"><span class="local-cache-key">counter</span><span class="local-cache-val">${counterVal}</span></div>
+    `;
+  }
+
+  const panel = document.querySelector(`[data-thread-panel="${threadKey}"]`);
+  if (panel) {
+    panel.classList.toggle("is-thread-highlight", state.ui.highlightThread === threadKey);
+  }
+}
+
+function renderStack(onSelect) {
+  renderStackPanel("stack-root", state.stack, "T1", onSelect);
+  renderStackPanel("stack-root-t2", state.stack2 || [], "T2", onSelect);
 }
 
 function buildObjectNode(objectId, onSelect) {
@@ -90,9 +134,12 @@ function buildObjectNode(objectId, onSelect) {
     return null;
   }
   const reachableIds = new Set(getReachableObjectIds());
-  const isOrphan = !reachableIds.has(objectId);
+  const isOrphan = object.type === "SharedObject" ? false : !reachableIds.has(objectId);
   const referenceNames = getReferenceNamesForObject(objectId);
-  const objectLabel = referenceNames.length ? referenceNames.join(", ") : "orphan";
+  let objectLabel = referenceNames.length ? referenceNames.join(", ") : "orphan";
+  if (object.type === "SharedObject") {
+    objectLabel = object.value || "SharedObject";
+  }
 
   const node = document.createElement("article");
   node.className = "heap-object";
@@ -204,36 +251,183 @@ function renderSidePanel() {
   }
 
   if (selected.kind === "frame") {
-    const frame = state.stack[selected.index];
+    const selThread = selected.thread ?? "T1";
+    const stackFrames = selThread === "T2" ? state.stack2 : state.stack;
+    const frame = stackFrames[selected.index];
     if (!frame) {
       selectionRoot.innerHTML = "<p>The selected frame is no longer on the stack.</p>";
       return;
     }
 
-    const items = Object.entries(frame.locals).map(([name, value]) => `<li><strong>${name}</strong> -> ${value}</li>`).join("");
+    const items = Object.entries(frame.locals)
+      .map(
+        ([name, value]) =>
+          `<li><strong>${escapeHtml(name)}</strong> -> ${escapeHtml(formatStackLocalTarget(value, selThread))}</li>`
+      )
+      .join("");
+    const threadLabel = selThread === "T2" ? "Thread 2" : "Thread 1";
     selectionRoot.innerHTML = `
       <div class="selection-card">
-        <p><strong>${frame.method}()</strong></p>
+        <p><strong>${threadLabel}: ${frame.method}()</strong></p>
         ${items ? `<ul>${items}</ul>` : "<p>No local variables in this frame.</p>"}
       </div>
     `;
   }
 }
 
+function volatileLocalAnchor(threadKey) {
+  return document.querySelector(
+    `.stack-panel[data-thread-panel="${threadKey}"] .local-row[data-object-anchor="volatileShared"]`
+  );
+}
+
+function stackRoot(threadKey) {
+  return threadKey === "T2"
+    ? document.querySelector("#stack-root-t2")
+    : document.querySelector("#stack-root");
+}
+
+function renderMemoryFlowArrow(layer, svgRect) {
+  const flow = state.ui.memoryArrow;
+  if (!flow || !flow.from || !flow.to) {
+    return;
+  }
+  if (state.ui.runningScenario !== "volatileBehavior") {
+    return;
+  }
+
+  const heapNode = document.querySelector('.heap-object[data-object-id="volatileShared"]');
+  const pad = 8;
+
+  /** Thread stacks sit to the right of Eden: emit toward heap from local row western edge */
+  function anchorWestOfThread(threadKey) {
+    const anchor = volatileLocalAnchor(threadKey);
+    if (anchor) {
+      const r = anchor.getBoundingClientRect();
+      return {
+        x: r.left - svgRect.left - pad,
+        y: r.top + r.height / 2 - svgRect.top
+      };
+    }
+
+    const root = stackRoot(threadKey);
+    if (root) {
+      const r = root.getBoundingClientRect();
+      return {
+        x: r.left - svgRect.left + pad,
+        y: r.top + Math.min(r.height * 0.28, 48) - svgRect.top
+      };
+    }
+
+    const panel = document.querySelector(`.stack-panel[data-thread-panel="${threadKey}"]`);
+    if (!panel) {
+      return null;
+    }
+    const r = panel.getBoundingClientRect();
+    return {
+      x: r.left - svgRect.left + pad * 2,
+      y: r.top + 120 - svgRect.top
+    };
+  }
+
+  let fromPt;
+  let toPt;
+
+  // Layout: Heap (left columns) → Thread panels (middle/right). Writes go toward SharedObject western face;
+  // reads originate from eastern face of SharedObject toward the reading thread's local row.
+  if (flow.from === "T1" && flow.to === "heap" && heapNode) {
+    fromPt = anchorWestOfThread("T1");
+    const rHeap = heapNode.getBoundingClientRect();
+    toPt = {
+      x: rHeap.left - svgRect.left - pad,
+      y: rHeap.top + rHeap.height / 2 - svgRect.top
+    };
+  } else if (flow.from === "heap" && flow.to === "T2" && heapNode) {
+    const rHeap = heapNode.getBoundingClientRect();
+    fromPt = {
+      x: rHeap.right - svgRect.left + pad,
+      y: rHeap.top + rHeap.height / 2 - svgRect.top
+    };
+    toPt = anchorWestOfThread("T2");
+  }
+
+  if (!fromPt || !toPt) {
+    return;
+  }
+
+  const d = `M ${fromPt.x} ${fromPt.y} L ${toPt.x} ${toPt.y}`;
+
+  layer.innerHTML = `
+    <defs>
+      <marker id="memory-arrow-head" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+        <path class="reference-arrow" d="M0,0 L8,4 L0,8 z"></path>
+      </marker>
+    </defs>
+    <path class="reference-line is-visible" d="${d}" marker-end="url(#memory-arrow-head)"></path>
+  `;
+}
+
+function renderVisibilityBanner() {
+  const strip = document.querySelector(".heap-panel .education-strip");
+  if (!strip) {
+    return;
+  }
+  let banner = strip.querySelector(".visibility-banner");
+  const msg = state.ui.visibilityBanner;
+  if (!msg) {
+    if (banner) {
+      banner.remove();
+    }
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.className = "visibility-banner";
+    strip.insertBefore(banner, strip.firstChild);
+  }
+  banner.textContent = msg;
+}
+
 function renderReferenceLines() {
   const layer = el("reference-layer");
+  if (!layer) {
+    return;
+  }
+  const svgRect = layer.getBoundingClientRect();
   layer.innerHTML = "";
+  renderMemoryFlowArrow(layer, svgRect);
+}
+
+function scheduleReferenceLinesRedraw() {
+  window.requestAnimationFrame(() => renderReferenceLines());
+}
+
+function syncVolatileCodeLineDisplay() {
+  const lineNode = document.querySelector('#code-panel .code-line[data-line-number="1"] .code-line-text');
+  if (!lineNode || !currentCodeLines.length) {
+    return;
+  }
+  const base = currentCodeLines[0];
+  if (state.ui.highlightCodeVolatile) {
+    lineNode.innerHTML = `<span class="code-volatile-keyword">volatile</span> ${escapeHtml("int counter = 0;")}`;
+  } else {
+    lineNode.textContent = base;
+  }
 }
 
 function renderCodePanel(codeLines) {
   currentCodeLines = codeLines || [];
   const panel = el("code-panel");
+  if (!panel) {
+    return;
+  }
   panel.innerHTML = currentCodeLines.map((line, index) => `
     <div class="code-line${currentActiveLine === index + 1 ? " active-line" : ""}" data-line-number="${index + 1}">
       <span class="code-line-number">${index + 1}</span>
       <span class="code-line-text">${escapeHtml(line)}</span>
     </div>
   `).join("") || `<div class="code-line"><span class="code-line-number">1</span><span class="code-line-text">Run a scenario to load Java code.</span></div>`;
+  syncVolatileCodeLineDisplay();
 }
 
 function highlightCodeLine(lineNumber) {
@@ -241,6 +435,7 @@ function highlightCodeLine(lineNumber) {
   document.querySelectorAll("#code-panel .code-line").forEach((lineNode) => {
     lineNode.classList.toggle("active-line", Number(lineNode.dataset.lineNumber) === currentActiveLine);
   });
+  syncVolatileCodeLineDisplay();
 
   const activeNode = document.querySelector(`#code-panel .code-line[data-line-number="${currentActiveLine}"]`);
   if (activeNode) {
@@ -258,10 +453,95 @@ function highlightCodeLine(lineNumber) {
   }
 }
 
+function scrollExecutionHostsToBottom() {
+  const hosts = [el("step-description"), el("side-step-description")].filter(Boolean);
+  window.requestAnimationFrame(() => {
+    hosts.forEach((host) => {
+      host.scrollTop = host.scrollHeight;
+    });
+    window.requestAnimationFrame(() => {
+      hosts.forEach((host) => {
+        host.scrollTop = host.scrollHeight;
+      });
+    });
+  });
+}
+
+function executionStepMarkup(bodyText, sequence, { placeholder = false } = {}) {
+  const extraClass = placeholder ? " execution-step-entry-placeholder" : "";
+  const marker = placeholder
+    ? ""
+    : `<div class="execution-step-marker">Step ${sequence}</div>`;
+  const dataAttr = placeholder ? "" : ` data-step-index="${sequence}"`;
+  return `
+    <div class="execution-step-entry is-current${extraClass}"${dataAttr}>
+      ${marker}
+      <p class="execution-step-body">${escapeHtml(bodyText)}</p>
+    </div>
+  `;
+}
+
+function clearExecutionSteps(placeholderText) {
+  executionStepSerial = 0;
+  const mainFeed = el("execution-steps-feed");
+  const sideFeed = el("side-execution-steps-feed");
+  const fallback = "Choose a scenario to follow each JVM step.";
+  const text =
+    placeholderText === undefined || placeholderText === null ? fallback : placeholderText;
+
+  const clearFeeds = () => {
+    if (mainFeed) {
+      mainFeed.innerHTML = "";
+    }
+    if (sideFeed) {
+      sideFeed.innerHTML = "";
+    }
+  };
+
+  if (text.trim() === "") {
+    clearFeeds();
+    scrollExecutionHostsToBottom();
+    return;
+  }
+
+  const html = executionStepMarkup(text, 0, { placeholder: true });
+  if (mainFeed) {
+    mainFeed.innerHTML = html;
+  }
+  if (sideFeed) {
+    sideFeed.innerHTML = html;
+  }
+  scrollExecutionHostsToBottom();
+}
+
+function appendExecutionStep(description) {
+  const body = typeof description === "string" ? description.trim() : "";
+  const text = body || "(No description)";
+  executionStepSerial += 1;
+  const n = executionStepSerial;
+  const html = executionStepMarkup(text, n);
+
+  [[el("execution-steps-feed"), el("step-description")], [el("side-execution-steps-feed"), el("side-step-description")]].forEach(
+    ([feed]) => {
+      if (!feed) {
+        return;
+      }
+      feed.querySelectorAll(".execution-step-entry.is-current").forEach((node) => {
+        node.classList.remove("is-current");
+      });
+      feed.querySelectorAll(".execution-step-entry-placeholder").forEach((node) => {
+        node.remove();
+      });
+      feed.insertAdjacentHTML("beforeend", html);
+    }
+  );
+
+  scrollExecutionHostsToBottom();
+}
+
+/** @deprecated single-line updates; playback uses append-only timeline */
 function setStepDescription(text) {
-  const description = text || "Choose a scenario to follow each JVM step.";
-  el("step-description").textContent = description;
-  el("side-step-description").textContent = description;
+  clearExecutionSteps(text);
 }
 
 function getMemorySnapshot() {
@@ -280,8 +560,11 @@ function getMemorySnapshot() {
   const oldUsed = counts.old * regularObjectSize;
   const poolUsed = counts.stringPool * pooledStringSize;
   const heapUsed = youngUsed + oldUsed + poolUsed;
-  const stackRoots = state.stack.reduce((sum, frame) => sum + Object.keys(frame.locals).length, 0);
-  const stackUsed = stackRoots * 6 + state.stack.length * 10;
+  const stackRoots2 = (state.stack2 || []).reduce((sum, frame) => sum + Object.keys(frame.locals).length, 0);
+  const stackRoots =
+    state.stack.reduce((sum, frame) => sum + Object.keys(frame.locals).length, 0) + stackRoots2;
+  const stackFrameCount = state.stack.length + (state.stack2 || []).length;
+  const stackUsed = stackRoots * 6 + stackFrameCount * 10;
   return {
     youngUsed,
     oldUsed,
@@ -297,6 +580,7 @@ function pushMemorySnapshot() {
   const signature = JSON.stringify({
     heap: state.heap,
     stack: state.stack,
+    stack2: state.stack2 || [],
     deleted: Object.keys(state.objects).filter((id) => state.objects[id]?.deleted)
   });
 
@@ -408,10 +692,17 @@ function resetMemoryTelemetry() {
 }
 
 function render(onSelect) {
+  const workspace = document.querySelector(".workspace");
+  if (workspace) {
+    workspace.classList.toggle("dual-thread-layout", Boolean(state.ui.volatileShowSecondStack));
+  }
+
   renderStack(onSelect);
   renderHeap(onSelect);
   renderSidePanel();
-  renderReferenceLines();
+  renderVisibilityBanner();
+  scheduleReferenceLinesRedraw();
+  syncVolatileCodeLineDisplay();
   renderMemoryChart();
 }
 
@@ -429,6 +720,8 @@ window.JVMSim = {
   captureObjectLayout,
   renderCodePanel,
   highlightCodeLine,
+  clearExecutionSteps,
+  appendExecutionStep,
   setStepDescription,
   resetMemoryTelemetry
 };

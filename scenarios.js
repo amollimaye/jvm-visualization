@@ -34,6 +34,7 @@ function hydrateGarbageCollectionSnapshot(payload) {
     method: payload.method,
     locals: { ...payload.locals }
   }];
+  state.stack2 = [];
 
   payload.objects.forEach((definition) => {
     createSnapshotObject(definition);
@@ -79,6 +80,10 @@ const explanations = {
   stringHandling: {
     title: "String literals are reused from the pool, while new String() always allocates a distinct object.",
     why: "The string pool interns literals by value, but constructor-based Strings allocate new heap objects even when the contents match."
+  },
+  volatileBehavior: {
+    title: "Stage 1 (no volatile) shows both thread stacks with divergent cached values; stage 2 enables volatile semantics and main-memory synchronization.",
+    why: "Without volatile, writes may stay thread-local while another thread reads a stale cached value; with volatile, modeled writes hit main memory and reads refresh from shared state."
   }
 };
 
@@ -144,7 +149,9 @@ const scenarios = {
       "// Collect Young Generation",
       "// Promote survivors",
       "// Collect Old Generation",
-      "// Compact memory"
+      "// Compact memory",
+      "// Drop old references",
+      "// Collect newly unreachable old objects"
     ],
     steps: [
       {
@@ -421,6 +428,144 @@ const scenarios = {
         },
         narration: "Cleared marks in Old Gen and returned the heap to its neutral state.",
         explanation: "All GC highlighting is now removed section by section, ending the collection walkthrough in a clean state."
+      },
+      {
+        stepId: 20,
+        codeLine: 7,
+        description: "Nulling the first old-generation stack reference.",
+        type: "UPDATE_STACK",
+        payload: {
+          action: "SET_LOCAL",
+          frameIndex: 0,
+          name: "obj3",
+          value: null
+        },
+        narration: "Set obj3 = null, dropping the reference to old object obj4.",
+        explanation: "Once the stack no longer references obj4, that old-generation object becomes eligible for collection."
+      },
+      {
+        stepId: 21,
+        codeLine: 7,
+        description: "Nulling the second old-generation stack reference.",
+        type: "UPDATE_STACK",
+        payload: {
+          action: "SET_LOCAL",
+          frameIndex: 0,
+          name: "obj4",
+          value: null
+        },
+        narration: "Set obj4 = null, dropping the reference to old object obj5.",
+        explanation: "This removes another Old Gen root path from the stack."
+      },
+      {
+        stepId: 22,
+        codeLine: 7,
+        description: "Nulling the third old-generation stack reference.",
+        type: "UPDATE_STACK",
+        payload: {
+          action: "SET_LOCAL",
+          frameIndex: 0,
+          name: "obj5",
+          value: null
+        },
+        narration: "Set obj5 = null, dropping the reference to old object obj6.",
+        explanation: "Old-generation reachability still depends on live stack roots."
+      },
+      {
+        stepId: 23,
+        codeLine: 7,
+        description: "Nulling the fourth old-generation stack reference.",
+        type: "UPDATE_STACK",
+        payload: {
+          action: "SET_LOCAL",
+          frameIndex: 0,
+          name: "obj6",
+          value: null
+        },
+        narration: "Set obj6 = null, dropping the reference to old object obj7.",
+        explanation: "Removing the stack reference makes obj7 newly unreachable too."
+      },
+      {
+        stepId: 24,
+        codeLine: 7,
+        description: "Nulling the fifth old-generation stack reference.",
+        type: "UPDATE_STACK",
+        payload: {
+          action: "SET_LOCAL",
+          frameIndex: 0,
+          name: "obj7",
+          value: null
+        },
+        narration: "Set obj7 = null, dropping the reference to old object obj10.",
+        explanation: "Five old-generation objects are now no longer reachable from the stack."
+      },
+      {
+        stepId: 25,
+        codeLine: 8,
+        description: "Marking the newly unreachable old-generation objects for collection.",
+        type: "MARK_OBJECTS",
+        payload: {
+          reachable: ["obj11", "obj12", "obj13"],
+          unreachable: ["obj4", "obj5", "obj6", "obj7", "obj10"],
+          clearOthers: false
+        },
+        narration: "Marked the newly unreachable old-generation objects in red.",
+        explanation: "After the stack references were nulled out, obj4, obj5, obj6, obj7, and obj10 became garbage."
+      },
+      {
+        stepId: 26,
+        codeLine: 8,
+        description: "Collecting the first newly unreachable old-generation object.",
+        type: "DELETE_OBJECT",
+        payload: {
+          id: "obj4"
+        },
+        narration: "Garbage collected obj4 from Old Gen.",
+        explanation: "The telemetry drops as old-generation occupancy is reclaimed."
+      },
+      {
+        stepId: 27,
+        codeLine: 8,
+        description: "Collecting the second newly unreachable old-generation object.",
+        type: "DELETE_OBJECT",
+        payload: {
+          id: "obj5"
+        },
+        narration: "Garbage collected obj5 from Old Gen.",
+        explanation: "Another reclaimed old-generation object lowers used heap further."
+      },
+      {
+        stepId: 28,
+        codeLine: 8,
+        description: "Collecting the third newly unreachable old-generation object.",
+        type: "DELETE_OBJECT",
+        payload: {
+          id: "obj6"
+        },
+        narration: "Garbage collected obj6 from Old Gen.",
+        explanation: "The final memory chart should continue stepping down during these removals."
+      },
+      {
+        stepId: 29,
+        codeLine: 8,
+        description: "Collecting the fourth newly unreachable old-generation object.",
+        type: "DELETE_OBJECT",
+        payload: {
+          id: "obj7"
+        },
+        narration: "Garbage collected obj7 from Old Gen.",
+        explanation: "This long-lived object is now reclaimed because its root reference was cleared."
+      },
+      {
+        stepId: 30,
+        codeLine: 8,
+        description: "Collecting the fifth newly unreachable old-generation object.",
+        type: "DELETE_OBJECT",
+        payload: {
+          id: "obj10"
+        },
+        narration: "Garbage collected obj10 from Old Gen.",
+        explanation: "The old-generation cleanup finishes with a visible drop in the memory telemetry."
       }
     ]
   },
@@ -644,6 +789,175 @@ const scenarios = {
         },
         narration: "Assigned c -> obj2.",
         explanation: "c points to a different object, even though the contents match the pooled literal."
+      }
+    ]
+  },
+  volatileBehavior: {
+    intro: explanations.volatileBehavior,
+    code: [
+      "int counter = 0;",
+      "",
+      "Thread 1:",
+      "counter = 10;",
+      "",
+      "Thread 2:",
+      "print(counter);"
+    ],
+    steps: [
+      {
+        stepId: 1,
+        codeLine: 1,
+        description:
+          "Stage 1 (no volatile): both thread stacks are visible immediately. Thread 1 cache shows 10 while Thread 2 cache still shows 0; SharedObject in main memory remains 0.",
+        type: "MEMORY_VISIBILITY",
+        instantRender: true,
+        payload: {
+          ensureHeapObject: { id: "volatileShared", section: "eden" },
+          sharedObject: { counter: 0, volatile: false },
+          threadLocal: { T1: { counter: 10 }, T2: { counter: 0 } },
+          stacks: {
+            t1: [{ method: "thread1", locals: { counter: "volatileShared" } }],
+            t2: [{ method: "thread2", locals: { counter: "volatileShared" } }]
+          },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          volatileShowSecondStack: true,
+          highlightThread: null,
+          memoryArrow: null,
+          visibilityBanner: "Stage 1 — Non-volatile: thread caches diverge (T1=10, T2=0) while main memory still shows 0.",
+          highlightCodeVolatile: false
+        },
+        narration: "Stage 1 starts with both stacks: Thread 1 has cached 10, Thread 2 still has cached 0, and SharedObject remains 0 in heap.",
+        explanation:
+          "Because the field is not volatile, this model allows thread-local caches to disagree before any synchronized visibility to main memory."
+      },
+      {
+        stepId: 2,
+        codeLine: 4,
+        description:
+          "Stage 1: focus Thread 1 write. Without volatile, the write stays in Thread 1 cache (10) and does not update SharedObject in main memory (still 0).",
+        type: "MEMORY_VISIBILITY",
+        payload: {
+          threadLocal: { T1: { counter: 10 } },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          volatileShowSecondStack: true,
+          highlightThread: "T1",
+          memoryArrow: null,
+          visibilityBanner: null,
+          highlightCodeVolatile: false
+        },
+        narration: "Thread 1’s cache holds 10; the heap SharedObject still shows counter = 0.",
+        explanation:
+          "Non-volatile writes are modeled as updating only this thread's cache without immediately flushing that value to shared main memory."
+      },
+      {
+        stepId: 3,
+        codeLine: 7,
+        description:
+          "Stage 1: Thread 2 runs print(counter) and reads its stale cached value 0, even though Thread 1 cache already holds 10.",
+        type: "MEMORY_VISIBILITY",
+        payload: {
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          volatileShowSecondStack: true,
+          highlightThread: "T2",
+          memoryArrow: null,
+          visibilityBanner: null,
+          highlightCodeVolatile: false
+        },
+        narration: "Thread 2 reads stale 0 from its own cache while Thread 1 cache is already 10.",
+        explanation:
+          "This is the visibility gap: with no volatile synchronization, one thread can keep observing an older cached value."
+      },
+      {
+        stepId: 4,
+        codeLine: 1,
+        description:
+          "Stage 2 (with volatile): layout expands to Thread 2. Reset counters and caches; both stacks now expose counter → volatileShared. Field is non-volatile again before we toggle volatile semantics.",
+        type: "MEMORY_VISIBILITY",
+        instantRender: true,
+        payload: {
+          sharedObject: { counter: 0, volatile: false },
+          threadLocal: { T1: { counter: 0 }, T2: { counter: 0 } },
+          stacks: {
+            t1: [{ method: "thread1", locals: { counter: "volatileShared" } }],
+            t2: [{ method: "thread2", locals: { counter: "volatileShared" } }]
+          },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          volatileShowSecondStack: true,
+          highlightThread: null,
+          memoryArrow: null,
+          visibilityBanner:
+            "Stage 2 — With volatile: Thread 2 stack shown. Subsequent steps replay writes/reads with main-memory visibility.",
+          highlightCodeVolatile: false
+        },
+        narration: "Second stack visible; baseline reset—both threads share the heap reference locally.",
+        explanation: "The same SharedObject instance stays in Eden while we rerun the storyline with synchronization arrows."
+      },
+      {
+        stepId: 5,
+        codeLine: 1,
+        description:
+          "Stage 2: The field is declared volatile — reads and writes are modeled against main memory visibility.",
+        type: "MEMORY_VISIBILITY",
+        payload: {
+          sharedObject: { volatile: true },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          highlightThread: null,
+          memoryArrow: null,
+          visibilityBanner:
+            "Visibility enabled: volatile reads/writes synchronize through SharedObject (main memory).",
+          highlightCodeVolatile: true
+        },
+        narration: "volatile is active; code panel reflects the volatile declaration.",
+        explanation: "This flag cues the simulator to flush modeled writes to the heap and to model reads against main memory."
+      },
+      {
+        stepId: 6,
+        codeLine: 4,
+        description:
+          "Stage 2: Thread 1 assigns counter = 10 with volatile; the write updates main memory (heap) and Thread 1’s cache — follow the arrow from Thread 1 to SharedObject.",
+        type: "MEMORY_VISIBILITY",
+        payload: {
+          sharedObject: { counter: 10 },
+          threadLocal: { T1: { counter: 10 } },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          highlightThread: "T1",
+          memoryArrow: { from: "T1", to: "heap" },
+          visibilityBanner: null,
+          highlightCodeVolatile: true
+        },
+        narration: "Thread 1 pushes 10 through to the SharedObject in Eden and retains 10 locally.",
+        explanation: "A volatile write crosses to main memory immediately in this pedagogical animation."
+      },
+      {
+        stepId: 7,
+        codeLine: 7,
+        description:
+          "Stage 2: Thread 2 runs print(counter) under volatile semantics — read hits main memory, then caches 10 locally (arrow heap → Thread 2).",
+        type: "MEMORY_VISIBILITY",
+        payload: {
+          threadLocal: { T2: { counter: 10 } },
+          volatileSharedId: "volatileShared"
+        },
+        ui: {
+          highlightThread: "T2",
+          memoryArrow: { from: "heap", to: "T2" },
+          visibilityBanner: null,
+          highlightCodeVolatile: true
+        },
+        narration: "Thread 2 reads 10 from main memory into its displayed local cache.",
+        explanation: "A volatile read refreshes value from SharedObject rather than trusting a stale local copy."
       }
     ]
   }
