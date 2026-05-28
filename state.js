@@ -10,6 +10,13 @@ const baseUi = () => ({
   memoryArrow: null,
   visibilityBanner: null,
   highlightCodeVolatile: false,
+  heapDumpModalOpen: false,
+  heapDumpCapturing: false,
+  heapDumpSelectedId: null,
+  threadDumpModalOpen: false,
+  threadDumpModalThreadKey: null,
+  threadDumpSelectedFrameIndex: null,
+  stepCounter: 0,
   // Dual-stack layout after Volatile Behavior; cleared when another scenario starts or reset.
   volatileShowSecondStack: false
 });
@@ -32,6 +39,11 @@ const baseState = () => ({
   threadLocal: {
     T1: { counter: 0 },
     T2: { counter: 0 }
+  },
+  heapDump: null,
+  threadDumps: {
+    T1: null,
+    T2: null
   },
   ui: baseUi()
 });
@@ -102,6 +114,194 @@ function clearScenarioRunning() {
   state.ui.visibilityBanner = null;
   state.ui.highlightCodeVolatile = false;
   // Keep volatileShowSecondStack: Thread 2 stays visible after Volatile Behavior until another scenario or reset.
+}
+
+function liveObjects() {
+  return Object.values(state.objects).filter((object) => object && !object.deleted);
+}
+
+function objectLabelFromLocals(objectId) {
+  const names = [];
+  const scanStack = (stack) => {
+    stack.forEach((frame) => {
+      Object.entries(frame.locals).forEach(([name, value]) => {
+        if (value === objectId) {
+          names.push(name);
+        }
+      });
+    });
+  };
+  scanStack(state.stack);
+  scanStack(state.stack2 || []);
+  return names[0] || objectId;
+}
+
+function shallowSizeKB(object) {
+  if (object.type === "String") {
+    return 8;
+  }
+  if (object.type === "SharedObject") {
+    return 20;
+  }
+  return 12;
+}
+
+function retainedSizeKB(object, gcRoots) {
+  const shallow = shallowSizeKB(object);
+  const ageWeight = Math.max(1, Number(object.age || 0) + 1);
+  const rootBonus = gcRoots.has(object.id) ? 8 : 2;
+  return shallow * ageWeight + rootBonus;
+}
+
+function sectionObjects(section, gcRoots) {
+  return state.heap[section].map((id) => state.objects[id]).filter((object) => object && !object.deleted).map((object) => ({
+    id: object.id,
+    type: object.type,
+    label: objectLabelFromLocals(object.id),
+    generation: object.generation,
+    age: object.age ?? 0,
+    section: object.section,
+    markStatus: object.markStatus ?? null,
+    reachability: gcRoots.has(object.id) ? "gc-root-linked" : (object.markStatus === "unreachable" ? "unreachable" : "reachable"),
+    shallowSizeKB: shallowSizeKB(object),
+    retainedSizeKB: retainedSizeKB(object, gcRoots)
+  }));
+}
+
+function memoryFromHeap() {
+  const heapCounts = {
+    eden: state.heap.eden.length,
+    s0: state.heap.s0.length,
+    s1: state.heap.s1.length,
+    old: state.heap.old.length,
+    stringPool: state.heap.stringPool.length
+  };
+  return (heapCounts.eden + heapCounts.s0 + heapCounts.s1 + heapCounts.old) * 12 + heapCounts.stringPool * 8;
+}
+
+function captureHeapDumpSnapshot() {
+  const gcRoots = new Set(localReferences());
+  const objects = liveObjects();
+  const classes = new Set(objects.map((object) => object.type));
+  const regions = {
+    eden: sectionObjects("eden", gcRoots),
+    s0: sectionObjects("s0", gcRoots),
+    s1: sectionObjects("s1", gcRoots),
+    old: sectionObjects("old", gcRoots),
+    stringPool: sectionObjects("stringPool", gcRoots)
+  };
+  state.heapDump = {
+    capturedAtStep: `t${state.ui.stepCounter}`,
+    capturedAtIso: new Date().toISOString(),
+    summary: {
+      heapUsedMB: memoryFromHeap(),
+      objectCount: objects.length,
+      threadCount: 1 + ((state.stack2 || []).length > 0 ? 1 : 0),
+      classCount: classes.size,
+      gcRootsCount: gcRoots.size
+    },
+    regions
+  };
+  state.ui.heapDumpSelectedId = null;
+  return state.heapDump;
+}
+
+function clearHeapDumpSnapshot() {
+  state.heapDump = null;
+  state.ui.heapDumpModalOpen = false;
+  state.ui.heapDumpSelectedId = null;
+}
+
+function stackForThread(threadKey) {
+  return threadKey === "T2" ? (state.stack2 || []) : state.stack;
+}
+
+function localTargetLabel(value, threadKey) {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (value === "volatileShared" && state.ui.volatileShowSecondStack) {
+    if (state.sharedObject.volatile === true) {
+      return threadKey === "T2" ? "volatile SharedObject s2" : "volatile SharedObject s1";
+    }
+    return "SharedObject";
+  }
+  return String(value);
+}
+
+function captureThreadDumpSnapshot(threadKey) {
+  const frames = stackForThread(threadKey).map((frame, index) => {
+    const locals = Object.entries(frame.locals).map(([name, value]) => ({
+      name,
+      value,
+      displayValue: localTargetLabel(value, threadKey)
+    }));
+    return {
+      index,
+      method: frame.method,
+      localCount: locals.length,
+      locals
+    };
+  });
+
+  const localValues = frames.flatMap((frame) => frame.locals.map((local) => local.value));
+  const rootRefCount = localValues.filter((value) => typeof value === "string" && Boolean(state.objects[value])).length;
+  const threadLabel = threadKey === "T2" ? "Thread 2" : "Thread 1";
+
+  state.threadDumps[threadKey] = {
+    threadKey,
+    capturedAtStep: `t${state.ui.stepCounter}`,
+    capturedAtIso: new Date().toISOString(),
+    summary: {
+      frameCount: frames.length,
+      localCount: frames.reduce((sum, frame) => sum + frame.localCount, 0),
+      rootRefCount,
+      topMethod: frames.length ? frames[frames.length - 1].method : "none",
+      threadState: state.ui.runningScenario ? "RUNNABLE" : "WAITING",
+      threadLabel
+    },
+    frames
+  };
+  state.ui.threadDumpSelectedFrameIndex = null;
+  return state.threadDumps[threadKey];
+}
+
+function clearThreadDumpSnapshots() {
+  state.threadDumps = {
+    T1: null,
+    T2: null
+  };
+  state.ui.threadDumpModalOpen = false;
+  state.ui.threadDumpModalThreadKey = null;
+  state.ui.threadDumpSelectedFrameIndex = null;
+}
+
+function setThreadDumpModalOpen(isOpen, threadKey = null) {
+  state.ui.threadDumpModalOpen = Boolean(isOpen);
+  state.ui.threadDumpModalThreadKey = isOpen ? threadKey : null;
+  if (!isOpen) {
+    state.ui.threadDumpSelectedFrameIndex = null;
+  }
+}
+
+function setThreadDumpSelectedFrame(index) {
+  state.ui.threadDumpSelectedFrameIndex = Number.isInteger(index) ? index : null;
+}
+
+function setHeapDumpCapturing(isCapturing) {
+  state.ui.heapDumpCapturing = Boolean(isCapturing);
+}
+
+function setHeapDumpModalOpen(isOpen) {
+  state.ui.heapDumpModalOpen = Boolean(isOpen);
+}
+
+function setHeapDumpSelectedObject(objectId) {
+  state.ui.heapDumpSelectedId = objectId || null;
+}
+
+function incrementStepCounter() {
+  state.ui.stepCounter += 1;
 }
 
 function getStateSnapshot() {
@@ -371,6 +571,16 @@ window.JVMSim = {
   setSelectedSelection,
   setScenarioRunning,
   clearScenarioRunning,
+  captureHeapDumpSnapshot,
+  clearHeapDumpSnapshot,
+  captureThreadDumpSnapshot,
+  clearThreadDumpSnapshots,
+  setHeapDumpCapturing,
+  setHeapDumpModalOpen,
+  setHeapDumpSelectedObject,
+  setThreadDumpModalOpen,
+  setThreadDumpSelectedFrame,
+  incrementStepCounter,
   getStateSnapshot,
   getReachableObjectIds,
   createObject,

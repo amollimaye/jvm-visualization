@@ -7,7 +7,17 @@ const {
   highlightCodeLine,
   resetMemoryTelemetry,
   clearExecutionSteps,
+  captureHeapDumpSnapshot,
+  clearHeapDumpSnapshot,
+  captureThreadDumpSnapshot,
+  clearThreadDumpSnapshots,
   appendExecutionStep,
+  setHeapDumpCapturing,
+  setHeapDumpModalOpen,
+  setHeapDumpSelectedObject,
+  setThreadDumpModalOpen,
+  setThreadDumpSelectedFrame,
+  incrementStepCounter,
   annotateStep,
   applyMemoryVisibility,
   clearScenarioRunning,
@@ -28,11 +38,22 @@ const {
 const playbackState = {
   paused: false,
   stepAdvanceRequested: false,
-  resolver: null
+  resolver: null,
+  modalForcedPause: false
 };
 
 function onSelect(selection) {
-  if (state.ui.runningScenario) {
+  if (state.ui.runningScenario && selection.kind !== "heapDumpObject" && selection.kind !== "threadDumpFrame") {
+    return;
+  }
+  if (selection.kind === "heapDumpObject") {
+    setHeapDumpSelectedObject(selection.id);
+    render(onSelect);
+    return;
+  }
+  if (selection.kind === "threadDumpFrame") {
+    setThreadDumpSelectedFrame(selection.index);
+    render(onSelect);
     return;
   }
 
@@ -72,6 +93,7 @@ function resetPlaybackState() {
   playbackState.paused = false;
   playbackState.stepAdvanceRequested = false;
   playbackState.resolver = null;
+  playbackState.modalForcedPause = false;
   updatePlaybackButtons();
   updateScenarioButtons();
 }
@@ -83,6 +105,7 @@ function pausePlayback() {
 
   playbackState.paused = true;
   playbackState.stepAdvanceRequested = false;
+  playbackState.modalForcedPause = false;
   updatePlaybackButtons();
 }
 
@@ -93,6 +116,7 @@ function resumePlayback() {
 
   playbackState.paused = false;
   playbackState.stepAdvanceRequested = false;
+  playbackState.modalForcedPause = false;
   releasePlaybackWait();
   updatePlaybackButtons();
 }
@@ -125,6 +149,12 @@ function waitForPlaybackGate() {
   });
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function applyStep(step) {
   if (step.type === "CREATE_OBJECT") {
     createObject(step.payload);
@@ -149,6 +179,7 @@ function applyStep(step) {
 async function runSteps(steps) {
   for (const step of steps) {
     await waitForPlaybackGate();
+    incrementStepCounter();
     highlightCodeLine(step.codeLine);
     appendExecutionStep(step.description);
 
@@ -161,12 +192,103 @@ async function runSteps(steps) {
   }
 }
 
+async function captureHeapDump() {
+  if (state.ui.heapDumpCapturing) {
+    return;
+  }
+  if (state.ui.runningScenario) {
+    pausePlayback();
+  }
+  setHeapDumpCapturing(true);
+  render(onSelect);
+  await wait(2000);
+  captureHeapDumpSnapshot();
+  setHeapDumpCapturing(false);
+  setHeapDumpModalOpen(false);
+  annotateStep(
+    `Heap Snapshot Captured (${state.heapDump?.capturedAtStep || "t0"})`,
+    "Captured conceptual heap snapshot from current runtime state."
+  );
+  render(onSelect);
+}
+
+function openHeapDumpModal() {
+  if (!state.heapDump) {
+    return;
+  }
+  setHeapDumpModalOpen(true);
+  syncModalDrivenPlayback();
+  render(onSelect);
+}
+
+function closeHeapDumpModal() {
+  setHeapDumpModalOpen(false);
+  syncModalDrivenPlayback();
+  render(onSelect);
+}
+
+function syncModalDrivenPlayback() {
+  const anyDumpModalOpen = Boolean(state.ui.heapDumpModalOpen || state.ui.threadDumpModalOpen);
+  if (!state.ui.runningScenario) {
+    playbackState.modalForcedPause = false;
+    return;
+  }
+
+  if (anyDumpModalOpen) {
+    if (!playbackState.paused) {
+      playbackState.paused = true;
+      playbackState.stepAdvanceRequested = false;
+      playbackState.modalForcedPause = true;
+      updatePlaybackButtons();
+    }
+    return;
+  }
+
+  if (playbackState.modalForcedPause && playbackState.paused) {
+    playbackState.paused = false;
+    playbackState.stepAdvanceRequested = false;
+    playbackState.modalForcedPause = false;
+    releasePlaybackWait();
+    updatePlaybackButtons();
+  }
+}
+
+function captureThreadDump(threadKey) {
+  captureThreadDumpSnapshot(threadKey);
+  setThreadDumpModalOpen(false);
+  annotateStep(
+    `${threadKey === "T2" ? "Thread 2" : "Thread 1"} Snapshot Captured (${state.threadDumps?.[threadKey]?.capturedAtStep || "t0"})`,
+    "Captured conceptual thread dump from current stack frames."
+  );
+  render(onSelect);
+}
+
+function openThreadDumpModal(threadKey) {
+  if (!state.threadDumps?.[threadKey]) {
+    return;
+  }
+  setThreadDumpModalOpen(true, threadKey);
+  syncModalDrivenPlayback();
+  render(onSelect);
+}
+
+function closeThreadDumpModal() {
+  setThreadDumpModalOpen(false);
+  syncModalDrivenPlayback();
+  render(onSelect);
+}
+
 async function runScenario(name) {
   const scenarioSource = scenarios[name];
   const scenario = typeof scenarioSource === "function" ? scenarioSource() : scenarioSource;
   if (!scenario) {
     return;
   }
+
+  // Selecting a new animation/scenario invalidates previous dumps.
+  clearHeapDumpSnapshot();
+  clearThreadDumpSnapshots();
+  setHeapDumpCapturing(false);
 
   setButtonsDisabled(true);
   if (!scenario.preserveState) {
@@ -205,6 +327,9 @@ function handleReset() {
   clearObjectMarks();
   resetMemoryTelemetry();
   resetPlaybackState();
+  clearHeapDumpSnapshot();
+  clearThreadDumpSnapshots();
+  setHeapDumpCapturing(false);
   renderCodePanel([]);
   highlightCodeLine(null);
   clearExecutionSteps("Choose a scenario to follow each JVM step.");
@@ -230,6 +355,35 @@ function initController() {
   document.getElementById("next-step-button").addEventListener("click", advanceSingleStep);
   document.getElementById("resume-button").addEventListener("click", resumePlayback);
   document.getElementById("reset-button").addEventListener("click", handleReset);
+  document.getElementById("heap-dump-button").addEventListener("click", () => {
+    captureHeapDump();
+  });
+  document.getElementById("show-heap-dump-button").addEventListener("click", openHeapDumpModal);
+  document.getElementById("close-heap-dump-button").addEventListener("click", closeHeapDumpModal);
+  document.querySelector('[data-heap-dump-close="overlay"]')?.addEventListener("click", closeHeapDumpModal);
+  document.getElementById("thread-dump-button-t1").addEventListener("click", () => {
+    captureThreadDump("T1");
+  });
+  document.getElementById("thread-dump-button-t2").addEventListener("click", () => {
+    captureThreadDump("T2");
+  });
+  document.getElementById("show-thread-dump-button-t1").addEventListener("click", () => {
+    openThreadDumpModal("T1");
+  });
+  document.getElementById("show-thread-dump-button-t2").addEventListener("click", () => {
+    openThreadDumpModal("T2");
+  });
+  document.getElementById("close-thread-dump-button").addEventListener("click", closeThreadDumpModal);
+  document.querySelector('[data-thread-dump-close="overlay"]')?.addEventListener("click", closeThreadDumpModal);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.ui.heapDumpModalOpen) {
+      closeHeapDumpModal();
+      return;
+    }
+    if (event.key === "Escape" && state.ui.threadDumpModalOpen) {
+      closeThreadDumpModal();
+    }
+  });
 
   window.addEventListener("resize", () => {
     if (state.ui.runningScenario) {

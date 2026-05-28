@@ -697,6 +697,233 @@ function renderMemoryChart() {
   renderMemoryLegend(memoryHistory[memoryHistory.length - 1]);
 }
 
+function renderHeapDumpModal(onSelect) {
+  const overlay = el("heap-dump-overlay");
+  const modal = el("heap-dump-modal");
+  const showButton = el("show-heap-dump-button");
+  const content = el("heap-dump-modal-content");
+  if (!overlay || !modal || !showButton || !content) {
+    return;
+  }
+
+  overlay.hidden = !state.ui.heapDumpCapturing;
+  modal.hidden = !state.ui.heapDumpModalOpen;
+  showButton.hidden = !state.heapDump;
+
+  if (!state.heapDump) {
+    content.innerHTML = `
+      <div class="heap-dump-empty">
+        <p>Capture a Heap Dump to analyze the current memory snapshot.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const dump = state.heapDump;
+  const summaryItems = [
+    ["Captured", dump.capturedAtStep],
+    ["Heap Used", `${dump.summary.heapUsedMB} MB`],
+    ["Objects", String(dump.summary.objectCount)],
+    ["Threads", String(dump.summary.threadCount)],
+    ["Classes", String(dump.summary.classCount)],
+    ["GC Roots", String(dump.summary.gcRootsCount)]
+  ];
+
+  const sectionOrder = ["eden", "s0", "s1", "old", "stringPool"];
+  const sectionNames = {
+    eden: "Eden",
+    s0: "Survivor S0",
+    s1: "Survivor S1",
+    old: "Old Gen",
+    stringPool: "String Pool"
+  };
+
+  const allObjects = sectionOrder.flatMap((section) => dump.regions[section] || []);
+  const histogramMap = new Map();
+  allObjects.forEach((object) => {
+    if (!histogramMap.has(object.type)) {
+      histogramMap.set(object.type, { type: object.type, count: 0, retained: 0 });
+    }
+    const item = histogramMap.get(object.type);
+    item.count += 1;
+    item.retained += object.retainedSizeKB;
+  });
+  const histogramRows = [...histogramMap.values()].sort((a, b) => b.retained - a.retained);
+
+  const selected = allObjects.find((object) => object.id === state.ui.heapDumpSelectedId) || null;
+  const selectedMarkup = selected
+    ? `
+      <div class="heap-dump-inspector-card">
+        <h4>${escapeHtml(selected.id)}</h4>
+        <dl>
+          <dt>Class</dt><dd>${escapeHtml(selected.type)}</dd>
+          <dt>Section</dt><dd>${escapeHtml(selected.section)}</dd>
+          <dt>Generation</dt><dd>${escapeHtml(selected.generation)}</dd>
+          <dt>Age</dt><dd>${selected.age}</dd>
+          <dt>Shallow</dt><dd>${selected.shallowSizeKB} KB</dd>
+          <dt>Retained</dt><dd>${selected.retainedSizeKB} KB</dd>
+          <dt>Reachability</dt><dd>${escapeHtml(selected.reachability)}</dd>
+        </dl>
+      </div>
+    `
+    : `<p>Select a dump object to inspect metadata.</p>`;
+
+  content.innerHTML = `
+    <div class="heap-dump-summary-grid">
+      ${summaryItems.map(([label, value]) => `
+        <article class="heap-dump-summary-card">
+          <p class="heap-dump-summary-label">${label}</p>
+          <p class="heap-dump-summary-value">${escapeHtml(value)}</p>
+        </article>
+      `).join("")}
+    </div>
+    <div class="heap-dump-layout">
+      <section class="heap-dump-column">
+        <h3>Regions + Histogram</h3>
+        ${sectionOrder.map((section) => `
+          <article class="heap-dump-region-row">
+            <span>${sectionNames[section]}</span>
+            <strong>${(dump.regions[section] || []).length}</strong>
+          </article>
+        `).join("")}
+        <div class="heap-dump-histogram">
+          ${histogramRows.map((row) => `
+            <article class="heap-dump-histogram-row">
+              <span>${escapeHtml(row.type)}</span>
+              <span>${row.count}</span>
+              <strong>${row.retained} KB</strong>
+            </article>
+          `).join("") || "<p>No objects available.</p>"}
+        </div>
+      </section>
+      <section class="heap-dump-column heap-dump-objects">
+        <h3>Object Regions</h3>
+        ${sectionOrder.map((section) => `
+          <div class="heap-dump-region-block">
+            <h4>${sectionNames[section]}</h4>
+            <div class="heap-dump-object-grid">
+              ${(dump.regions[section] || []).map((object) => `
+                <button class="heap-dump-object-chip ${state.ui.heapDumpSelectedId === object.id ? "is-selected" : ""}" type="button" data-dump-object-id="${object.id}">
+                  <span>${escapeHtml(object.id)}</span>
+                  <small>${escapeHtml(object.type)}</small>
+                  <small>${object.retainedSizeKB} KB</small>
+                </button>
+              `).join("") || `<p class="heap-dump-empty-inline">No objects</p>`}
+            </div>
+          </div>
+        `).join("")}
+      </section>
+      <section class="heap-dump-column">
+        <h3>Object Inspector</h3>
+        <div class="heap-dump-inspector">${selectedMarkup}</div>
+      </section>
+    </div>
+  `;
+
+  content.querySelectorAll("[data-dump-object-id]").forEach((node) => {
+    node.addEventListener("click", () => {
+      onSelect({
+        kind: "heapDumpObject",
+        id: node.dataset.dumpObjectId
+      });
+    });
+  });
+}
+
+function renderThreadDumpModal(onSelect) {
+  const modal = el("thread-dump-modal");
+  const content = el("thread-dump-modal-content");
+  const subtitle = el("thread-dump-modal-subtitle");
+  const showT1 = el("show-thread-dump-button-t1");
+  const showT2 = el("show-thread-dump-button-t2");
+  if (!modal || !content || !subtitle || !showT1 || !showT2) {
+    return;
+  }
+
+  showT1.hidden = !state.threadDumps?.T1;
+  showT2.hidden = !state.threadDumps?.T2;
+  modal.hidden = !state.ui.threadDumpModalOpen;
+
+  const threadKey = state.ui.threadDumpModalThreadKey;
+  const dump = threadKey ? state.threadDumps?.[threadKey] : null;
+  if (!dump) {
+    subtitle.textContent = "Conceptual snapshot for selected thread.";
+    content.innerHTML = `
+      <div class="heap-dump-empty">
+        <p>Capture a Thread Dump to analyze this thread snapshot.</p>
+      </div>
+    `;
+    return;
+  }
+
+  subtitle.textContent = `${dump.summary.threadLabel} - captured at ${dump.capturedAtStep}`;
+  const summaryItems = [
+    ["Thread", dump.summary.threadLabel],
+    ["State", dump.summary.threadState],
+    ["Frames", String(dump.summary.frameCount)],
+    ["Locals", String(dump.summary.localCount)],
+    ["Root Refs", String(dump.summary.rootRefCount)],
+    ["Top Method", dump.summary.topMethod]
+  ];
+
+  const selectedFrame = dump.frames.find((frame) => frame.index === state.ui.threadDumpSelectedFrameIndex) || null;
+  const inspectorHtml = selectedFrame
+    ? `
+      <div class="heap-dump-inspector-card">
+        <h4>${escapeHtml(selectedFrame.method)}()</h4>
+        <dl>
+          <dt>Frame Index</dt><dd>${selectedFrame.index}</dd>
+          <dt>Locals</dt><dd>${selectedFrame.localCount}</dd>
+        </dl>
+        <div class="heap-dump-histogram">
+          ${selectedFrame.locals.map((local) => `
+            <article class="heap-dump-histogram-row">
+              <span>${escapeHtml(local.name)}</span>
+              <strong>${escapeHtml(local.displayValue)}</strong>
+            </article>
+          `).join("") || "<p>No locals in this frame.</p>"}
+        </div>
+      </div>
+    `
+    : "<p>Select a frame to inspect local variables.</p>";
+
+  content.innerHTML = `
+    <div class="heap-dump-summary-grid">
+      ${summaryItems.map(([label, value]) => `
+        <article class="heap-dump-summary-card">
+          <p class="heap-dump-summary-label">${label}</p>
+          <p class="heap-dump-summary-value">${escapeHtml(value)}</p>
+        </article>
+      `).join("")}
+    </div>
+    <div class="heap-dump-layout">
+      <section class="heap-dump-column">
+        <h3>Frame Timeline</h3>
+        ${(dump.frames || []).map((frame) => `
+          <button class="heap-dump-histogram-row heap-dump-frame-row ${state.ui.threadDumpSelectedFrameIndex === frame.index ? "is-selected" : ""}" type="button" data-thread-frame-index="${frame.index}">
+            <span>${escapeHtml(frame.method)}()</span>
+            <span>#${frame.index}</span>
+            <strong>${frame.localCount} locals</strong>
+          </button>
+        `).join("") || "<p>No frames captured for this thread.</p>"}
+      </section>
+      <section class="heap-dump-column">
+        <h3>Frame Inspector</h3>
+        <div class="heap-dump-inspector">${inspectorHtml}</div>
+      </section>
+    </div>
+  `;
+
+  content.querySelectorAll("[data-thread-frame-index]").forEach((node) => {
+    node.addEventListener("click", () => {
+      onSelect({
+        kind: "threadDumpFrame",
+        index: Number(node.dataset.threadFrameIndex)
+      });
+    });
+  });
+}
+
 function resetMemoryTelemetry() {
   memoryHistory = [];
   lastMemorySignature = null;
@@ -715,6 +942,8 @@ function render(onSelect) {
   scheduleReferenceLinesRedraw();
   syncVolatileCodeLineDisplay();
   renderMemoryChart();
+  renderHeapDumpModal(onSelect);
+  renderThreadDumpModal(onSelect);
 }
 
 function captureObjectLayout() {
