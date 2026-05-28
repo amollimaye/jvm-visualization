@@ -299,6 +299,24 @@ function renderMemoryFlowArrow(layer, svgRect) {
   const heapNode = document.querySelector('.heap-object[data-object-id="volatileShared"]');
   const pad = 8;
 
+  function anchorHeapObject(side) {
+    if (!heapNode) {
+      return null;
+    }
+    const rHeap = heapNode.getBoundingClientRect();
+    const y = rHeap.top + rHeap.height / 2 - svgRect.top;
+    if (side === "west") {
+      return {
+        x: rHeap.left - svgRect.left - pad,
+        y
+      };
+    }
+    return {
+      x: rHeap.right - svgRect.left + pad,
+      y
+    };
+  }
+
   /** Thread stacks sit to the right of Eden: emit toward heap from local row western edge */
   function anchorWestOfThread(threadKey) {
     const anchor = volatileLocalAnchor(threadKey);
@@ -335,19 +353,12 @@ function renderMemoryFlowArrow(layer, svgRect) {
 
   // Layout: Heap (left columns) → Thread panels (middle/right). Writes go toward SharedObject western face;
   // reads originate from eastern face of SharedObject toward the reading thread's local row.
-  if (flow.from === "T1" && flow.to === "heap" && heapNode) {
+  if (flow.from === "T1" && flow.to === "heap") {
     fromPt = anchorWestOfThread("T1");
-    const rHeap = heapNode.getBoundingClientRect();
-    toPt = {
-      x: rHeap.left - svgRect.left - pad,
-      y: rHeap.top + rHeap.height / 2 - svgRect.top
-    };
-  } else if (flow.from === "heap" && flow.to === "T2" && heapNode) {
-    const rHeap = heapNode.getBoundingClientRect();
-    fromPt = {
-      x: rHeap.right - svgRect.left + pad,
-      y: rHeap.top + rHeap.height / 2 - svgRect.top
-    };
+    // Thread 1 writes from stack (right side) into heap (left side), so target the object's east edge.
+    toPt = anchorHeapObject("east");
+  } else if (flow.from === "heap" && flow.to === "T2") {
+    fromPt = anchorHeapObject("east");
     toPt = anchorWestOfThread("T2");
   }
 

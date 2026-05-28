@@ -46,6 +46,13 @@ function setButtonsDisabled(disabled) {
   });
 }
 
+function updateScenarioButtons() {
+  const running = state.ui.runningScenario;
+  document.querySelectorAll("button[data-scenario]").forEach((button) => {
+    button.classList.toggle("is-active", Boolean(running) && button.dataset.scenario === running);
+  });
+}
+
 function updatePlaybackButtons() {
   const hasScenario = Boolean(state.ui.runningScenario);
   document.getElementById("pause-button").disabled = !hasScenario || playbackState.paused;
@@ -66,6 +73,7 @@ function resetPlaybackState() {
   playbackState.stepAdvanceRequested = false;
   playbackState.resolver = null;
   updatePlaybackButtons();
+  updateScenarioButtons();
 }
 
 function pausePlayback() {
@@ -171,6 +179,7 @@ async function runScenario(name) {
     state.ui.volatileShowSecondStack = false;
   }
   setScenarioRunning(name);
+  updateScenarioButtons();
   resetPlaybackState();
   updatePlaybackButtons();
   renderCodePanel(scenario.code);
@@ -184,6 +193,7 @@ async function runScenario(name) {
     await runSteps(scenario.steps);
   } finally {
     clearScenarioRunning();
+    updateScenarioButtons();
     resetPlaybackState();
     setButtonsDisabled(false);
     render(onSelect);
@@ -203,6 +213,7 @@ function handleReset() {
     "All objects, references, and frames were cleared so the next scenario starts from a known state."
   );
   render(onSelect);
+  updateScenarioButtons();
 }
 
 function initController() {
